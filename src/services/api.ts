@@ -1,0 +1,58 @@
+const API_BASE = "http://localhost:9000";
+
+function getToken(): string | null {
+  return localStorage.getItem("token");
+}
+
+function getUsuarioLogin(): string {
+  try {
+    const u = localStorage.getItem("usuario");
+    return u ? (JSON.parse(u).login ?? "pdv") : "pdv";
+  } catch {
+    return "pdv";
+  }
+}
+
+async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
+  const token = getToken();
+  const method = (options.method ?? "GET").toUpperCase();
+  const headers: Record<string, string> = {
+    "Content-Type": "application/json",
+    ...(options.headers as Record<string, string>),
+  };
+  if (token) headers["Authorization"] = `Bearer ${token}`;
+
+  const res = await fetch(`${API_BASE}${path}`, { ...options, headers });
+  const usuario = getUsuarioLogin();
+
+  if (res.status === 401) {
+    if (path !== "/auth/login") {
+      localStorage.removeItem("token");
+      localStorage.removeItem("usuario");
+      window.dispatchEvent(new CustomEvent("auth:sessao-expirada"));
+    }
+    throw new Error(
+      path === "/auth/login"
+        ? "Usuário ou senha incorretos"
+        : "Sessão expirada. Faça login novamente."
+    );
+  }
+
+  if (!res.ok) {
+    const body = await res.text();
+    console.error(`[PDV] ${method} ${path} [${res.status}] usuario=${usuario}`, body);
+    throw new Error(body || `Erro ${res.status}`);
+  }
+
+  if (res.status === 204) return undefined as T;
+  return res.json() as Promise<T>;
+}
+
+export const api = {
+  get: <T>(path: string) => request<T>(path),
+  post: <T>(path: string, body: unknown) =>
+    request<T>(path, { method: "POST", body: JSON.stringify(body) }),
+  put: <T>(path: string, body: unknown) =>
+    request<T>(path, { method: "PUT", body: JSON.stringify(body) }),
+  delete: <T>(path: string) => request<T>(path, { method: "DELETE" }),
+};
