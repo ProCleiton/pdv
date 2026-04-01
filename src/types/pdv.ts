@@ -65,6 +65,8 @@ export interface FormaPagamento {
 }
 
 export interface PagamentoCarrinho {
+  /** ID único por entrada (UUID) — necessário para remoção individual em split payment */
+  id: string;
   codigoFormaPagamento: number;
   nomeFormaPagamento: string;
   valor: number;

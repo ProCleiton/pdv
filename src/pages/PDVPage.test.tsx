@@ -70,6 +70,18 @@ async function pagarComDinheiro(valorRecebido = "20,00") {
   fireEvent.click(screen.getByRole("button", { name: /confirmar/i }));
 }
 
+/** Helper: pagar com forma não-Dinheiro via ModalValorParcial. */
+async function pagarComModalParcial(nomeBotao: string, valor: string) {
+  await waitFor(() => expect(screen.getByRole("button", { name: nomeBotao })).toBeInTheDocument());
+  fireEvent.click(screen.getByRole("button", { name: nomeBotao }));
+  // ModalValorParcial: "Restante" só aparece neste modal
+  await waitFor(() => expect(screen.getByText(/restante/i)).toBeInTheDocument());
+  fireEvent.change(screen.getByPlaceholderText("0,00"), { target: { value: valor } });
+  fireEvent.click(screen.getByRole("button", { name: /confirmar/i }));
+  // Aguardar o modal fechar
+  await waitFor(() => expect(screen.queryByText(/^Restante/i)).not.toBeInTheDocument());
+}
+
 describe("PDVPage", () => {
   it("renderiza header com nome do terminal", () => {
     renderPage();
@@ -192,6 +204,102 @@ describe("PDVPage", () => {
     expect(body.pagamentos[0].nsu).toBeUndefined();
     expect(body.pagamentos[0].codigoAutorizacao).toBeUndefined();
     expect(body.pagamentos[0].bandeira).toBeUndefined();
+  });
+
+  it("PIX abre ModalValorParcial com valor padrão (restante completo)", async () => {
+    renderPage();
+    await adicionarProduto(); // produto R$10
+    await waitFor(() => expect(screen.getByRole("button", { name: "PIX" })).toBeInTheDocument());
+    fireEvent.click(screen.getByRole("button", { name: "PIX" }));
+    // "Restante" é texto exclusivo do ModalValorParcial
+    await waitFor(() => expect(screen.getByText(/restante/i)).toBeInTheDocument());
+    // Input deve ter valor padrão igual ao total (R$10,00)
+    expect(screen.getByDisplayValue("10,00")).toBeInTheDocument();
+    // Cancelar — modal deve fechar (usar texto exato para não conflitar com "Cancelar Venda (F6)")
+    fireEvent.click(screen.getByRole("button", { name: "Cancelar (Esc)" }));
+    await waitFor(() => expect(screen.queryByText(/^Restante/i)).not.toBeInTheDocument());
+  });
+
+  it("pagamento misto: PIX parcial + Dinheiro completo (split payment)", async () => {
+    let capturedBody: unknown = null;
+    server.use(
+      http.post(`${BASE}/vendas`, async ({ request }) => {
+        capturedBody = await request.json();
+        return HttpResponse.json({ id: 101 }, { status: 201 });
+      })
+    );
+    renderPage();
+    await adicionarProduto(); // produto R$10
+
+    // Pagar R$5 com PIX
+    await pagarComModalParcial("PIX", "5,00");
+
+    // Pagar R$5 restantes com Dinheiro (ModalTroco) — usar getByText por causa do emoji no botão
+    await waitFor(() => expect(screen.getByText("Dinheiro")).toBeInTheDocument());
+    fireEvent.click(screen.getByText("Dinheiro"));
+    await waitFor(() => expect(screen.getByText("Pagamento em Dinheiro")).toBeInTheDocument());
+    fireEvent.change(screen.getByPlaceholderText("0,00"), { target: { value: "5,00" } });
+    fireEvent.click(screen.getByRole("button", { name: /confirmar/i }));
+
+    // Finalizar
+    const btnFinalizar = screen.getByRole("button", { name: /finalizar venda/i });
+    await waitFor(() => expect(btnFinalizar).not.toBeDisabled());
+    fireEvent.click(btnFinalizar);
+    await waitFor(() => screen.getByText(/venda finalizada/i));
+
+    const body = capturedBody as { pagamentos: Array<{ codigoFormaPagamento: number; valor: number }> };
+    expect(body.pagamentos).toHaveLength(2);
+    const totalEnviado = body.pagamentos.reduce((s, p) => s + p.valor, 0);
+    expect(totalEnviado).toBeCloseTo(10, 1);
+  });
+
+  it("permite remover pagamento individual da lista", async () => {
+    renderPage();
+    await adicionarProduto(); // produto R$10
+
+    // Adicionar PIX com R$5 (parcial)
+    await pagarComModalParcial("PIX", "5,00");
+
+    // Botão ✕ deve aparecer
+    await waitFor(() =>
+      expect(screen.getByTitle("Remover pagamento")).toBeInTheDocument()
+    );
+
+    // Remover
+    fireEvent.click(screen.getByTitle("Remover pagamento"));
+
+    // Botão Finalizar deve voltar a ficar desabilitado (restante > 0)
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: /finalizar venda/i })).toBeDisabled()
+    );
+  });
+
+  it("pagamento duplo com mesma forma (2× PIX)", async () => {
+    let capturedBody: unknown = null;
+    server.use(
+      http.post(`${BASE}/vendas`, async ({ request }) => {
+        capturedBody = await request.json();
+        return HttpResponse.json({ id: 102 }, { status: 201 });
+      })
+    );
+    renderPage();
+    await adicionarProduto(); // produto R$10
+
+    // Primeiro PIX R$6
+    await pagarComModalParcial("PIX", "6,00");
+
+    // Segundo PIX R$4
+    await pagarComModalParcial("PIX", "4,00");
+
+    const btnFinalizar = screen.getByRole("button", { name: /finalizar venda/i });
+    await waitFor(() => expect(btnFinalizar).not.toBeDisabled());
+    fireEvent.click(btnFinalizar);
+    await waitFor(() => screen.getByText(/venda finalizada/i));
+
+    const body = capturedBody as { pagamentos: Array<{ codigoFormaPagamento: number; valor: number }> };
+    // Dois pagamentos separados com o mesmo codigoFormaPagamento
+    expect(body.pagamentos).toHaveLength(2);
+    expect(body.pagamentos[0].codigoFormaPagamento).toBe(body.pagamentos[1].codigoFormaPagamento);
   });
 });
 
