@@ -13,6 +13,7 @@ import { useTEF } from "@/hooks/useTEF";
 import type { TipoTransacaoTEF } from "@/services/tef";
 import TEFModal from "@/components/TEFModal";
 import ModalTroco from "@/pages/ModalTroco";
+import ModalValorParcial from "@/pages/ModalValorParcial";
 
 interface Props {
   turno: TurnoCaixa;
@@ -52,6 +53,10 @@ export default function PDVPage({ turno, usuario, licenca, onSangria, onFechamen
   const [showTroco, setShowTroco] = useState(false);
   const [formaTroco, setFormaTroco] = useState<FormaPagamento | null>(null);
 
+  // Modal Valor Parcial (split payment — formas não-Dinheiro)
+  const [showValorParcial, setShowValorParcial] = useState(false);
+  const [fpValorParcialAtual, setFpValorParcialAtual] = useState<FormaPagamento | null>(null);
+
   // Estado do modal TEF
   const [showTEF, setShowTEF] = useState(false);
   const [tipoTEFAtual, setTipoTEFAtual] = useState<TipoTransacaoTEF>("credito_vista");
@@ -77,7 +82,7 @@ export default function PDVPage({ turno, usuario, licenca, onSangria, onFechamen
     ).values()
   );
 
-  const modalAberto = showTEF || showTroco;
+  const modalAberto = showTEF || showTroco || showValorParcial;
 
   useEffect(() => {
     if (!modalAberto) buscaRef.current?.focus();
@@ -227,27 +232,36 @@ export default function PDVPage({ turno, usuario, licenca, onSangria, onFechamen
     valor: number,
     tefData?: { nsu?: string; codigoAutorizacao?: string; bandeira?: string; tipoTransacao?: string }
   ) {
-    setPagamentos((prev) => {
-      const idx = prev.findIndex((p) => p.codigoFormaPagamento === forma.id);
-      if (idx >= 0 && !tefData) {
-        const att = [...prev];
-        att[idx] = { ...att[idx], valor: att[idx].valor + valor };
-        return att;
-      }
-      return [...prev, {
-        codigoFormaPagamento: forma.id,
-        nomeFormaPagamento: forma.descricao,
-        valor,
-        nsu: tefData?.nsu,
-        codigoAutorizacao: tefData?.codigoAutorizacao,
-        bandeira: tefData?.bandeira,
-        tipoTransacao: tefData?.tipoTransacao,
-      }];
-    });
+    setPagamentos((prev) => [...prev, {
+      id: crypto.randomUUID(),
+      codigoFormaPagamento: forma.id,
+      nomeFormaPagamento: forma.descricao,
+      valor,
+      nsu: tefData?.nsu,
+      codigoAutorizacao: tefData?.codigoAutorizacao,
+      bandeira: tefData?.bandeira,
+      tipoTransacao: tefData?.tipoTransacao,
+    }]);
   }
 
   async function handleCliqueFormaPagamento(forma: FormaPagamento) {
     if (restante <= 0) return;
+
+    if (ehDinheiro(forma.descricao)) {
+      setFormaTroco(forma);
+      setShowTroco(true);
+    } else {
+      // TEF e demais formas: solicita valor parcial antes de prosseguir
+      setFpValorParcialAtual(forma);
+      setShowValorParcial(true);
+    }
+  }
+
+  async function handleConfirmarValorParcial(valor: number) {
+    if (!fpValorParcialAtual) return;
+    const forma = fpValorParcialAtual;
+    setShowValorParcial(false);
+    setFpValorParcialAtual(null);
 
     if (tef.ehPagamentoTEF(forma.id)) {
       const tipo = inferirTipoTEF(forma.descricao);
@@ -256,37 +270,19 @@ export default function PDVPage({ turno, usuario, licenca, onSangria, onFechamen
       setShowTEF(true);
       tefPendenteFinalizar.current = false;
       try {
-        await tef.iniciarPagamento(restante, tipo);
+        await tef.iniciarPagamento(valor, tipo);
         tefPendenteFinalizar.current = true;
       } catch {
         setShowTEF(false);
       }
-    } else if (ehDinheiro(forma.descricao)) {
-      // Dinheiro: pede valor recebido para calcular troco
-      setFormaTroco(forma);
-      setShowTroco(true);
     } else {
-      adicionarPagamentoDireto(forma, restante);
+      adicionarPagamentoDireto(forma, valor);
     }
   }
 
   function handleConfirmarTroco(valorRecebido: number) {
     if (!formaTroco) return;
-    // Registra pagamento como o valor restante (nao o valor recebido)
-    // O troco e calculado no painel como totalPago - totalCarrinho
-    adicionarPagamentoDireto(formaTroco, restante, undefined);
-    // Adicionar o excedente para que o troco apareça no painel
-    if (valorRecebido > restante) {
-      setPagamentos((prev) => {
-        const idx = prev.findIndex((p) => p.codigoFormaPagamento === formaTroco.id);
-        if (idx >= 0) {
-          const att = [...prev];
-          att[idx] = { ...att[idx], valor: valorRecebido };
-          return att;
-        }
-        return prev;
-      });
-    }
+    adicionarPagamentoDireto(formaTroco, valorRecebido, undefined);
     setShowTroco(false);
     setFormaTroco(null);
   }
@@ -327,6 +323,10 @@ export default function PDVPage({ turno, usuario, licenca, onSangria, onFechamen
 
   function limparPagamentos() { setPagamentos([]); }
 
+  function removerPagamento(id: string) {
+    setPagamentos((prev) => prev.filter((p) => p.id !== id));
+  }
+
   async function finalizarVenda() {
     if (carrinho.length === 0) { setErroBusca("Carrinho vazio."); return; }
     if (restante > 0) { setErroBusca("Pagamento insuficiente."); return; }
@@ -345,7 +345,7 @@ export default function PDVPage({ turno, usuario, licenca, onSangria, onFechamen
         })),
         pagamentos: pagamentos.map((p) => ({
           codigoFormaPagamento: p.codigoFormaPagamento,
-          valor: p.valor > totalCarrinho ? totalCarrinho : p.valor, // grava valor real, nao troco
+          valor: p.valor,
           ...(p.nsu               && { nsu: p.nsu }),
           ...(p.codigoAutorizacao && { codigoAutorizacao: p.codigoAutorizacao }),
           ...(p.bandeira          && { bandeira: p.bandeira }),
@@ -568,9 +568,19 @@ export default function PDVPage({ turno, usuario, licenca, onSangria, onFechamen
             {pagamentos.length > 0 && (
               <div className="space-y-1 mt-2">
                 {pagamentos.map((p) => (
-                  <div key={p.codigoFormaPagamento} className="flex justify-between text-sm">
-                    <span className="text-[var(--muted-foreground)]">{p.nomeFormaPagamento}</span>
-                    <span className="text-[var(--foreground)]">{formataMoeda(p.valor)}</span>
+                  <div key={p.id} className="flex justify-between items-center text-sm">
+                    <span className="text-[var(--muted-foreground)]">
+                      {p.nomeFormaPagamento}
+                      {p.nsu && <span className="text-xs ml-1 opacity-60">NSU:{p.nsu}</span>}
+                    </span>
+                    <div className="flex items-center gap-1">
+                      <span className="text-[var(--foreground)]">{formataMoeda(p.valor)}</span>
+                      <button
+                        onClick={() => removerPagamento(p.id)}
+                        title="Remover pagamento"
+                        className="text-[var(--destructive)] hover:opacity-80 text-xs px-1"
+                      >✕</button>
+                    </div>
                   </div>
                 ))}
                 <button onClick={limparPagamentos} className="text-xs text-[var(--destructive)] hover:opacity-80">
@@ -620,6 +630,16 @@ export default function PDVPage({ turno, usuario, licenca, onSangria, onFechamen
           valorRestante={restante}
           onConfirmar={handleConfirmarTroco}
           onCancelar={() => { setShowTroco(false); setFormaTroco(null); }}
+        />
+      )}
+
+      {/* Modal Valor Parcial (split payment) */}
+      {showValorParcial && fpValorParcialAtual && (
+        <ModalValorParcial
+          forma={fpValorParcialAtual}
+          valorMaximo={restante}
+          onConfirmar={handleConfirmarValorParcial}
+          onCancelar={() => { setShowValorParcial(false); setFpValorParcialAtual(null); }}
         />
       )}
     </div>
