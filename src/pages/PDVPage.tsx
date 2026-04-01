@@ -12,6 +12,7 @@ import { useImpressora } from "@/hooks/useImpressora";
 import { useTEF } from "@/hooks/useTEF";
 import type { TipoTransacaoTEF } from "@/services/tef";
 import TEFModal from "@/components/TEFModal";
+import ModalTroco from "@/pages/ModalTroco";
 
 interface Props {
   turno: TurnoCaixa;
@@ -22,14 +23,19 @@ interface Props {
   onConfig: () => void;
 }
 
-/** Mapeia descrição da forma de pagamento para tipo TEF. */
+/** Mapeia descricao da forma de pagamento para tipo TEF. */
 function inferirTipoTEF(descricao: string): TipoTransacaoTEF {
   const d = descricao.toLowerCase();
-  if (d.includes("débit") || d.includes("debito")) return "debito";
+  if (d.includes("debit") || d.includes("debito")) return "debito";
   if (d.includes("pix")) return "pix";
-  if (d.includes("voucher") || d.includes("benefício") || d.includes("beneficio") || d.includes("vale")) return "voucher";
+  if (d.includes("voucher") || d.includes("beneficio") || d.includes("vale")) return "voucher";
   if (d.includes("parc")) return "credito_parcelado_loja";
   return "credito_vista";
+}
+
+/** Retorna true se a forma de pagamento e dinheiro. */
+function ehDinheiro(descricao: string): boolean {
+  return descricao.toUpperCase().includes("DINHEIRO");
 }
 
 export default function PDVPage({ turno, usuario, licenca, onSangria, onFechamento, onConfig }: Props) {
@@ -39,7 +45,12 @@ export default function PDVPage({ turno, usuario, licenca, onSangria, onFechamen
   const [erroBusca, setErroBusca] = useState("");
   const [finalizando, setFinalizando] = useState(false);
   const [sucesso, setSucesso] = useState(false);
+  const [itemSelecionadoIdx, setItemSelecionadoIdx] = useState<number | null>(null);
   const buscaRef = useRef<HTMLInputElement>(null);
+
+  // Modal Troco (dinheiro)
+  const [showTroco, setShowTroco] = useState(false);
+  const [formaTroco, setFormaTroco] = useState<FormaPagamento | null>(null);
 
   // Estado do modal TEF
   const [showTEF, setShowTEF] = useState(false);
@@ -50,33 +61,134 @@ export default function PDVPage({ turno, usuario, licenca, onSangria, onFechamen
   const { imprimirRecibo, abrirGavetaManual, imprimindo, erroImpressora } = useImpressora(usuario);
   const tef = useTEF(usuario);
 
-  const { data: formasPagamento = [] } = useQuery<FormaPagamento[]>({
+  const { data: formasPagamentoRaw = [] } = useQuery<FormaPagamento[]>({
     queryKey: ["formas-pagamento"],
     queryFn: () => api.get<FormaPagamento[]>("/formas-pagamentos"),
     staleTime: 300_000,
   });
 
-  useEffect(() => {
-    buscaRef.current?.focus();
-  }, [sucesso]);
+  // Deduplica por nome normalizado (salvaguarda contra DB ter registros com IDs distintos mas nomes iguais)
+  const formasPagamento = Array.from(
+    new Map(
+      formasPagamentoRaw.map((f) => [
+        f.descricao.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").trim(),
+        f,
+      ])
+    ).values()
+  );
 
+  const modalAberto = showTEF || showTroco;
+
+  useEffect(() => {
+    if (!modalAberto) buscaRef.current?.focus();
+  }, [sucesso, modalAberto]);
+
+  // Calculos
+  const totalCarrinho = carrinho.reduce(
+    (acc, item) => acc + (item.precoUnitario - item.desconto) * item.quantidade,
+    0
+  );
+  const totalPago = pagamentos.reduce((acc, p) => acc + p.valor, 0);
+  const restante = totalCarrinho - totalPago;
+  const troco = totalPago > totalCarrinho ? totalPago - totalCarrinho : 0;
+
+  // ─── Atalhos de teclado globais ─────────────────────────────────────────────
+  useEffect(() => {
+    function handler(e: KeyboardEvent) {
+      const tag = (e.target as HTMLElement).tagName;
+      const emInput = tag === "INPUT" || tag === "TEXTAREA";
+
+      // Esc: fecha modais ou limpa busca
+      if (e.key === "Escape") {
+        if (showTroco) { setShowTroco(false); setFormaTroco(null); return; }
+        if (showTEF) return;
+        if (busca) { setBusca(""); buscaRef.current?.focus(); }
+        return;
+      }
+
+      if (modalAberto) return;
+
+      // F12 — Finalizar venda
+      if (e.key === "F12") {
+        e.preventDefault();
+        finalizarVenda();
+        return;
+      }
+
+      // F6 — Cancelar venda
+      if (e.key === "F6") {
+        e.preventDefault();
+        if (carrinho.length > 0) {
+          setCarrinho([]);
+          setPagamentos([]);
+          setErroBusca("");
+          setBusca("");
+          buscaRef.current?.focus();
+        }
+        return;
+      }
+
+      // Del — Remove item selecionado (ou ultimo se nenhum selecionado)
+      if (e.key === "Delete" && !emInput) {
+        e.preventDefault();
+        const idx = itemSelecionadoIdx !== null ? itemSelecionadoIdx : carrinho.length - 1;
+        if (idx >= 0) {
+          setCarrinho((prev) => prev.filter((_, i) => i !== idx));
+          setItemSelecionadoIdx(null);
+        }
+        return;
+      }
+
+      // Setas: navega entre itens do carrinho
+      if ((e.key === "ArrowUp" || e.key === "ArrowDown") && !emInput && carrinho.length > 0) {
+        e.preventDefault();
+        setItemSelecionadoIdx((prev) => {
+          const atual = prev ?? (e.key === "ArrowDown" ? -1 : carrinho.length);
+          const prox = e.key === "ArrowDown" ? atual + 1 : atual - 1;
+          return Math.max(0, Math.min(prox, carrinho.length - 1));
+        });
+        return;
+      }
+
+      // Qualquer tecla alfanumerica fora de input: foca campo de busca
+      if (!emInput && e.key.length === 1 && !e.ctrlKey && !e.altKey && !e.metaKey) {
+        buscaRef.current?.focus();
+      }
+    }
+
+    document.addEventListener("keydown", handler);
+    return () => document.removeEventListener("keydown", handler);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [busca, carrinho, itemSelecionadoIdx, modalAberto, showTEF, showTroco]);
+
+  // ─── Busca com suporte a multiplicador (ex: "3*leite" ou "3*7891234567890") ──
   const buscarProduto = useCallback(async () => {
     const termo = busca.trim();
     if (!termo) return;
     setErroBusca("");
+
+    // Detectar prefixo de quantidade: "3*termo" => qtd=3, busca="termo"
+    let quantidade = 1;
+    let termoBusca = termo;
+    const multMatch = termo.match(/^(\d+)\*(.+)$/);
+    if (multMatch) {
+      quantidade = Math.max(1, parseInt(multMatch[1], 10));
+      termoBusca = multMatch[2].trim();
+    }
+
     try {
       let produto: Produto | null = null;
       try {
-        produto = await api.get<Produto>(`/produtos/barras/${encodeURIComponent(termo)}`);
+        produto = await api.get<Produto>(`/produtos/barras/${encodeURIComponent(termoBusca)}`);
       } catch {
-        const lista = await api.get<Produto[]>(`/produtos?busca=${encodeURIComponent(termo)}`);
+        const lista = await api.get<Produto[]>(`/produtos?busca=${encodeURIComponent(termoBusca)}`);
         if (lista && lista.length > 0) produto = lista[0];
       }
       if (!produto) {
         setErroBusca("Produto não encontrado.");
         return;
       }
-      adicionarAoCarrinho(produto);
+      adicionarAoCarrinho(produto, quantidade);
       setBusca("");
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : "Erro na busca";
@@ -84,20 +196,21 @@ export default function PDVPage({ turno, usuario, licenca, onSangria, onFechamen
     }
   }, [busca]);
 
-  function adicionarAoCarrinho(produto: Produto) {
+  function adicionarAoCarrinho(produto: Produto, qtd = 1) {
     setCarrinho((prev) => {
       const idx = prev.findIndex((item) => item.produto.id === produto.id);
       if (idx >= 0) {
         const atualizado = [...prev];
-        atualizado[idx] = { ...atualizado[idx], quantidade: atualizado[idx].quantidade + 1 };
+        atualizado[idx] = { ...atualizado[idx], quantidade: atualizado[idx].quantidade + qtd };
         return atualizado;
       }
-      return [...prev, { produto, quantidade: 1, precoUnitario: produto.precoVenda, desconto: 0 }];
+      return [...prev, { produto, quantidade: qtd, precoUnitario: produto.precoVenda, desconto: 0 }];
     });
   }
 
   function removerItem(idx: number) {
     setCarrinho((prev) => prev.filter((_, i) => i !== idx));
+    if (itemSelecionadoIdx === idx) setItemSelecionadoIdx(null);
   }
 
   function alterarQuantidade(idx: number, novaQtd: number) {
@@ -109,15 +222,6 @@ export default function PDVPage({ turno, usuario, licenca, onSangria, onFechamen
     });
   }
 
-  const totalCarrinho = carrinho.reduce(
-    (acc, item) => acc + (item.precoUnitario - item.desconto) * item.quantidade,
-    0
-  );
-
-  const totalPago = pagamentos.reduce((acc, p) => acc + p.valor, 0);
-  const restante = totalCarrinho - totalPago;
-  const troco = totalPago > totalCarrinho ? totalPago - totalCarrinho : 0;
-
   function adicionarPagamentoDireto(
     forma: FormaPagamento,
     valor: number,
@@ -126,7 +230,6 @@ export default function PDVPage({ turno, usuario, licenca, onSangria, onFechamen
     setPagamentos((prev) => {
       const idx = prev.findIndex((p) => p.codigoFormaPagamento === forma.id);
       if (idx >= 0 && !tefData) {
-        // Pagamento direto: soma ao existente
         const att = [...prev];
         att[idx] = { ...att[idx], valor: att[idx].valor + valor };
         return att;
@@ -147,7 +250,6 @@ export default function PDVPage({ turno, usuario, licenca, onSangria, onFechamen
     if (restante <= 0) return;
 
     if (tef.ehPagamentoTEF(forma.id)) {
-      // Fluxo TEF — abre modal e inicia transação no PINPAD
       const tipo = inferirTipoTEF(forma.descricao);
       setTipoTEFAtual(tipo);
       setFpTEFAtual(forma);
@@ -155,20 +257,42 @@ export default function PDVPage({ turno, usuario, licenca, onSangria, onFechamen
       tefPendenteFinalizar.current = false;
       try {
         await tef.iniciarPagamento(restante, tipo);
-        // Após iniciar, o usuário vai passar o cartão — aguardamos confirmar() quando fechar modal
         tefPendenteFinalizar.current = true;
       } catch {
         setShowTEF(false);
       }
+    } else if (ehDinheiro(forma.descricao)) {
+      // Dinheiro: pede valor recebido para calcular troco
+      setFormaTroco(forma);
+      setShowTroco(true);
     } else {
-      // Fluxo direto (dinheiro, etc.)
       adicionarPagamentoDireto(forma, restante);
     }
   }
 
+  function handleConfirmarTroco(valorRecebido: number) {
+    if (!formaTroco) return;
+    // Registra pagamento como o valor restante (nao o valor recebido)
+    // O troco e calculado no painel como totalPago - totalCarrinho
+    adicionarPagamentoDireto(formaTroco, restante, undefined);
+    // Adicionar o excedente para que o troco apareça no painel
+    if (valorRecebido > restante) {
+      setPagamentos((prev) => {
+        const idx = prev.findIndex((p) => p.codigoFormaPagamento === formaTroco.id);
+        if (idx >= 0) {
+          const att = [...prev];
+          att[idx] = { ...att[idx], valor: valorRecebido };
+          return att;
+        }
+        return prev;
+      });
+    }
+    setShowTroco(false);
+    setFormaTroco(null);
+  }
+
   async function handleTEFFechar() {
     if (tef.status === "aprovado" && tef.transacao && fpTEFAtual) {
-      // Adiciona ao carrinho com dados TEF completos (NSU, autorização, bandeira)
       adicionarPagamentoDireto(fpTEFAtual, tef.transacao.valorCentavos / 100, {
         nsu: tef.transacao.nsu,
         codigoAutorizacao: tef.transacao.codigoAutorizacao,
@@ -185,20 +309,16 @@ export default function PDVPage({ turno, usuario, licenca, onSangria, onFechamen
     await tef.cancelar();
   }
 
-  // Quando o modal TEF fecha, o hook já processou — precisamos confirmar na fase de pagamento
-  // A confirmação real (gravar NSU na venda) ocorre em finalizarVenda()
   async function handleConfirmarTEF() {
     try {
       await tef.confirmar();
     } catch {
-      // erro já tratado no hook
+      // erro tratado no hook
     }
   }
 
-  // Escuta mudanças de status do TEF enquanto o modal está aberto
   useEffect(() => {
     if (showTEF && tef.status === "aguardando_cartao" && tefPendenteFinalizar.current) {
-      // Dispara a confirmação automaticamente (simula o operador aguardando o cartão)
       handleConfirmarTEF();
       tefPendenteFinalizar.current = false;
     }
@@ -220,12 +340,12 @@ export default function PDVPage({ turno, usuario, licenca, onSangria, onFechamen
         itens: carrinho.map((item) => ({
           codigoProduto: item.produto.id,
           quantidade: item.quantidade,
-          precoUnitario: item.precoUnitario,
+          precoVenda: item.precoUnitario,
           desconto: item.desconto,
         })),
         pagamentos: pagamentos.map((p) => ({
           codigoFormaPagamento: p.codigoFormaPagamento,
-          valor: p.valor,
+          valor: p.valor > totalCarrinho ? totalCarrinho : p.valor, // grava valor real, nao troco
           ...(p.nsu               && { nsu: p.nsu }),
           ...(p.codigoAutorizacao && { codigoAutorizacao: p.codigoAutorizacao }),
           ...(p.bandeira          && { bandeira: p.bandeira }),
@@ -235,7 +355,6 @@ export default function PDVPage({ turno, usuario, licenca, onSangria, onFechamen
       const resultado = await api.post<{ id: number }>("/vendas", body);
       await logInfo("PDV", usuario.login, "venda_finalizada", `id=${resultado.id} itens=${carrinho.length} total=${totalCarrinho}`);
 
-      // Imprimir recibo automaticamente (silencioso se impressora não configurada)
       await imprimirRecibo({
         numeroCupom: formataNumeroPedido(resultado.id),
         nomeEstabelecimento: licenca.nomeTerminal,
@@ -257,6 +376,7 @@ export default function PDVPage({ turno, usuario, licenca, onSangria, onFechamen
 
       setCarrinho([]);
       setPagamentos([]);
+      setItemSelecionadoIdx(null);
       setSucesso(true);
       setTimeout(() => setSucesso(false), 2000);
     } catch (err: unknown) {
@@ -267,6 +387,10 @@ export default function PDVPage({ turno, usuario, licenca, onSangria, onFechamen
       setFinalizando(false);
     }
   }
+
+  // Hint de multiplicador no input
+  const multMatch = busca.match(/^(\d+)\*(.*)$/);
+  const multiplicadorAtivo = multMatch ? parseInt(multMatch[1], 10) : null;
 
   return (
     <div className="flex flex-col h-full">
@@ -279,49 +403,52 @@ export default function PDVPage({ turno, usuario, licenca, onSangria, onFechamen
         </div>
         <div className="flex items-center gap-2">
           <span className="text-sm text-[var(--muted-foreground)] hidden md:inline">{usuario.nome}</span>
-          <Button
-            variant="outline"
-            size="sm"
-            onClick={() => abrirGavetaManual()}
-            title="Abrir gaveta manualmente"
-          >
-            🗂
-          </Button>
-          <Button variant="outline" size="sm" onClick={onConfig} title="Configurações de hardware">
-            ⚙️
-          </Button>
+          <Button variant="outline" size="sm" onClick={() => abrirGavetaManual()} title="Abrir gaveta manualmente">🗂</Button>
+          <Button variant="outline" size="sm" onClick={onConfig} title="Configuracoes de hardware">⚙️</Button>
           <Button variant="outline" size="sm" onClick={onSangria}>Sangria</Button>
           <Button variant="destructive" size="sm" onClick={onFechamento}>Fechar Caixa</Button>
         </div>
       </header>
 
-      {/* Mensagem de erro da impressora (não bloqueia fluxo) */}
       {erroImpressora && (
         <div className="px-4 py-1 text-xs text-[var(--destructive)] bg-[var(--destructive)]/10 border-b border-[var(--destructive)]/20">
           ⚠️ Impressora: {erroImpressora}
         </div>
       )}
 
-      {/* Conteúdo principal */}
       <div className="flex flex-1 overflow-hidden">
         {/* Painel esquerdo: busca + carrinho */}
         <div className="flex flex-col flex-1 overflow-hidden border-r border-[var(--border)]">
           {/* Busca */}
           <div className="p-3 border-b border-[var(--border)] space-y-2">
-            <div className="flex gap-2">
-              <Input
-                ref={buscaRef}
-                value={busca}
-                onChange={(e) => setBusca(e.target.value)}
-                onKeyDown={(e) => e.key === "Enter" && buscarProduto()}
-                placeholder="Código de barras ou descrição…"
-                className="flex-1 text-base"
-                autoFocus
-              />
+            <div className="flex gap-2 items-center">
+              <div className="relative flex-1">
+                <Input
+                  ref={buscaRef}
+                  value={busca}
+                  onChange={(e) => { setBusca(e.target.value); setErroBusca(""); }}
+                  onKeyDown={(e) => e.key === "Enter" && buscarProduto()}
+                  placeholder="Código de barras, descrição ou 3*codigo…"
+                  className="flex-1 text-base pr-24"
+                  autoFocus
+                />
+                {multiplicadorAtivo && (
+                  <span className="absolute right-3 top-1/2 -translate-y-1/2 text-xs font-bold text-[var(--primary)] bg-[var(--primary)]/10 px-2 py-0.5 rounded">
+                    Qtd: {multiplicadorAtivo}
+                  </span>
+                )}
+              </div>
               <Button onClick={buscarProduto} variant="outline">Buscar</Button>
             </div>
-            {erroBusca && <p className="text-xs text-[var(--destructive)]">{erroBusca}</p>}
-            {sucesso && <p className="text-xs text-[var(--success)]">✓ Venda finalizada com sucesso!</p>}
+            <div className="flex justify-between items-center">
+              <div className="flex-1">
+                {erroBusca && <p className="text-xs text-[var(--destructive)]">{erroBusca}</p>}
+                {sucesso && <p className="text-xs text-green-500">✓ Venda finalizada com sucesso!</p>}
+              </div>
+              <p className="text-xs text-[var(--muted-foreground)] hidden md:block">
+                F12 Finalizar • F6 Cancelar • Del Remover • ↑↓ Navegar • Qtd*código
+              </p>
+            </div>
           </div>
 
           {/* Carrinho */}
@@ -343,17 +470,26 @@ export default function PDVPage({ turno, usuario, licenca, onSangria, onFechamen
                 </thead>
                 <tbody>
                   {carrinho.map((item, idx) => (
-                    <tr key={item.produto.id} className={cn("border-b border-[var(--border)]", idx % 2 === 0 ? "bg-[var(--card)]" : "")}>
+                    <tr
+                      key={item.produto.id}
+                      onClick={() => setItemSelecionadoIdx(idx)}
+                      className={cn(
+                        "border-b border-[var(--border)] cursor-pointer transition-colors",
+                        itemSelecionadoIdx === idx
+                          ? "bg-[var(--primary)]/10 ring-1 ring-inset ring-[var(--primary)]/30"
+                          : idx % 2 === 0 ? "bg-[var(--card)]" : ""
+                      )}
+                    >
                       <td className="px-3 py-2 text-[var(--foreground)]">{item.produto.descricao}</td>
                       <td className="px-2 py-2">
                         <div className="flex items-center justify-center gap-1">
                           <button
-                            onClick={() => alterarQuantidade(idx, item.quantidade - 1)}
+                            onClick={(e) => { e.stopPropagation(); alterarQuantidade(idx, item.quantidade - 1); }}
                             className="w-6 h-6 rounded bg-[var(--muted)] hover:bg-[var(--border)] text-[var(--foreground)] text-xs"
                           >−</button>
                           <span className="w-8 text-center">{item.quantidade}</span>
                           <button
-                            onClick={() => alterarQuantidade(idx, item.quantidade + 1)}
+                            onClick={(e) => { e.stopPropagation(); alterarQuantidade(idx, item.quantidade + 1); }}
                             className="w-6 h-6 rounded bg-[var(--muted)] hover:bg-[var(--border)] text-[var(--foreground)] text-xs"
                           >+</button>
                         </div>
@@ -364,9 +500,9 @@ export default function PDVPage({ turno, usuario, licenca, onSangria, onFechamen
                       </td>
                       <td className="pr-2">
                         <button
-                          onClick={() => removerItem(idx)}
+                          onClick={(e) => { e.stopPropagation(); removerItem(idx); }}
                           className="text-[var(--destructive)] hover:opacity-80 text-xs px-1"
-                          title="Remover"
+                          title="Remover (Del)"
                         >✕</button>
                       </td>
                     </tr>
@@ -389,18 +525,18 @@ export default function PDVPage({ turno, usuario, licenca, onSangria, onFechamen
               <>
                 <div className="flex justify-between items-center mt-1">
                   <span className="text-sm text-[var(--muted-foreground)]">Pago</span>
-                  <span className="text-sm text-[var(--success)]">{formataMoeda(totalPago)}</span>
+                  <span className="text-sm text-green-500">{formataMoeda(totalPago)}</span>
                 </div>
                 {restante > 0 && (
                   <div className="flex justify-between items-center">
                     <span className="text-sm text-[var(--muted-foreground)]">Falta</span>
-                    <span className="text-sm text-[var(--warning)]">{formataMoeda(restante)}</span>
+                    <span className="text-sm text-yellow-500">{formataMoeda(restante)}</span>
                   </div>
                 )}
                 {troco > 0 && (
-                  <div className="flex justify-between items-center mt-1">
-                    <span className="text-sm font-medium text-[var(--foreground)]">Troco</span>
-                    <span className="text-lg font-bold text-[var(--success)]">{formataMoeda(troco)}</span>
+                  <div className="flex justify-between items-center mt-2 p-2 rounded-lg bg-green-500/10 border border-green-500/20">
+                    <span className="text-sm font-medium text-[var(--foreground)]">💵 Troco</span>
+                    <span className="text-xl font-bold text-green-500">{formataMoeda(troco)}</span>
                   </div>
                 )}
               </>
@@ -418,11 +554,13 @@ export default function PDVPage({ turno, usuario, licenca, onSangria, onFechamen
                   disabled={restante <= 0}
                   className={cn(
                     "rounded-lg border border-[var(--border)] bg-[var(--card)] hover:bg-[var(--muted)] disabled:opacity-40 py-3 px-2 text-sm text-center text-[var(--foreground)] transition-colors",
-                    tef.ehPagamentoTEF(fp.id) && "ring-1 ring-[var(--primary)]"
+                    tef.ehPagamentoTEF(fp.id) && "ring-1 ring-[var(--primary)]",
+                    ehDinheiro(fp.descricao) && "ring-1 ring-green-500/50"
                   )}
-                  title={tef.ehPagamentoTEF(fp.id) ? "Pagamento via PINPAD (TEF)" : undefined}
+                  title={tef.ehPagamentoTEF(fp.id) ? "Pagamento via PINPAD (TEF)" : ehDinheiro(fp.descricao) ? "Informe o valor recebido para calcular troco" : undefined}
                 >
                   {tef.ehPagamentoTEF(fp.id) && <span className="text-xs block text-[var(--primary)] mb-1">💳</span>}
+                  {ehDinheiro(fp.descricao) && <span className="text-xs block text-green-500 mb-1">💵</span>}
                   {fp.descricao}
                 </button>
               ))}
@@ -442,7 +580,7 @@ export default function PDVPage({ turno, usuario, licenca, onSangria, onFechamen
             )}
           </div>
 
-          {/* Botões de ação */}
+          {/* Botoes de acao */}
           <div className="p-3 space-y-2 mt-auto">
             <Button
               onClick={finalizarVenda}
@@ -450,16 +588,16 @@ export default function PDVPage({ turno, usuario, licenca, onSangria, onFechamen
               size="xl"
               disabled={finalizando || imprimindo || carrinho.length === 0 || restante > 0}
             >
-              {finalizando ? "Finalizando…" : imprimindo ? "Imprimindo…" : "Finalizar Venda"}
+              {finalizando ? "Finalizando…" : imprimindo ? "Imprimindo…" : "Finalizar Venda (F12)"}
             </Button>
             <Button
               variant="outline"
-              onClick={() => { setCarrinho([]); setPagamentos([]); setErroBusca(""); }}
+              onClick={() => { setCarrinho([]); setPagamentos([]); setErroBusca(""); setItemSelecionadoIdx(null); }}
               className="w-full"
               size="sm"
               disabled={carrinho.length === 0}
             >
-              Cancelar
+              Cancelar Venda (F6)
             </Button>
           </div>
         </div>
@@ -473,6 +611,15 @@ export default function PDVPage({ turno, usuario, licenca, onSangria, onFechamen
           tipo={tipoTEFAtual}
           onCancelar={handleTEFCancelar}
           onFechar={handleTEFFechar}
+        />
+      )}
+
+      {/* Modal Troco (dinheiro) */}
+      {showTroco && (
+        <ModalTroco
+          valorRestante={restante}
+          onConfirmar={handleConfirmarTroco}
+          onCancelar={() => { setShowTroco(false); setFormaTroco(null); }}
         />
       )}
     </div>

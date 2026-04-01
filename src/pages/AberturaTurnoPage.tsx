@@ -97,8 +97,15 @@ export default function AberturaTurnoPage({ licenca, usuario, onTurnoAberto, onT
             </div>
 
             {erro && (
-              <div className="rounded-md bg-[var(--destructive)]/10 border border-[var(--destructive)]/30 p-3 text-sm text-[var(--destructive)]">
-                {erro}
+              <div className="rounded-md bg-[var(--destructive)]/10 border border-[var(--destructive)]/30 p-3 text-sm text-[var(--destructive)] space-y-2">
+                <p>{erro}</p>
+                <button
+                  type="button"
+                  onClick={() => setErro("")}
+                  className="text-xs underline opacity-70 hover:opacity-100"
+                >
+                  Tentar novamente
+                </button>
               </div>
             )}
 

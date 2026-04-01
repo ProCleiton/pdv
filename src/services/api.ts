@@ -41,7 +41,16 @@ async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
   if (!res.ok) {
     const body = await res.text();
     console.error(`[PDV] ${method} ${path} [${res.status}] usuario=${usuario}`, body);
-    throw new Error(body || `Erro ${res.status}`);
+    let mensagem = `Erro ${res.status}`;
+    if (body) {
+      try {
+        const json = JSON.parse(body);
+        mensagem = json.error ?? json.message ?? json.mensagem ?? body;
+      } catch {
+        mensagem = body;
+      }
+    }
+    throw new Error(mensagem);
   }
 
   if (res.status === 204) return undefined as T;
