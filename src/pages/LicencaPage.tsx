@@ -71,14 +71,24 @@ export default function LicencaPage({ onLicencaValida, onErroPermanente }: Props
     if (!login.trim() || !senha) { setErro("Informe usuário e senha."); return; }
     setProcessando(true);
     try {
-      const result = await api.post<{ token: string; usuario: UsuarioPDV }>("/auth/login", {
+      const result = await api.post<{ token: string; id: number; login: string; nome: string; tipo: string; codigoPerfil: number; nomePerfil: string; codigoEstabelecimento: number; codigoFuncionario: number }>("/auth/login", {
         usuario: login.trim(),
         senha,
       });
+      const usuario: UsuarioPDV = {
+        id: result.id,
+        login: result.login,
+        nome: result.nome,
+        tipo: result.tipo,
+        codigoPerfil: result.codigoPerfil,
+        nomePerfil: result.nomePerfil,
+        codigoEstabelecimento: result.codigoEstabelecimento,
+        codigoFuncionario: result.codigoFuncionario,
+      };
       localStorage.setItem("token", result.token);
-      localStorage.setItem("usuario", JSON.stringify(result.usuario));
-      setUsuarioTemp(result.usuario);
-      await logInfo("Licenca", result.usuario.login, "login_pdv", "login realizado no PDV standalone");
+      localStorage.setItem("usuario", JSON.stringify(usuario));
+      setUsuarioTemp(usuario);
+      await logInfo("Licenca", usuario.login, "login_pdv", "login realizado no PDV standalone");
       setEtapa("licenca");
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : "Erro ao fazer login";
