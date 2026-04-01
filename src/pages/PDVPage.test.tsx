@@ -53,6 +53,23 @@ function renderPage() {
   return { onSangria, onFechamento, onConfig };
 }
 
+/** Helper: adiciona produto ao carrinho e aguarda aparecer. */
+async function adicionarProduto(codigo = "789001") {
+  const input = screen.getByPlaceholderText(/barras/i);
+  fireEvent.change(input, { target: { value: codigo } });
+  fireEvent.keyDown(input, { key: "Enter", code: "Enter" });
+  await waitFor(() => expect(screen.getByText("Produto Teste")).toBeInTheDocument());
+}
+
+/** Helper: pagar com dinheiro via modal troco. */
+async function pagarComDinheiro(valorRecebido = "20,00") {
+  await waitFor(() => expect(screen.getByText("Dinheiro")).toBeInTheDocument());
+  fireEvent.click(screen.getByText("Dinheiro"));
+  await waitFor(() => expect(screen.getByText("Pagamento em Dinheiro")).toBeInTheDocument());
+  fireEvent.change(screen.getByPlaceholderText("0,00"), { target: { value: valorRecebido } });
+  fireEvent.click(screen.getByRole("button", { name: /confirmar/i }));
+}
+
 describe("PDVPage", () => {
   it("renderiza header com nome do terminal", () => {
     renderPage();
@@ -61,29 +78,26 @@ describe("PDVPage", () => {
 
   it("renderiza campo de busca", () => {
     renderPage();
-    expect(screen.getByPlaceholderText(/código de barras/i)).toBeInTheDocument();
+    expect(screen.getByPlaceholderText(/barras/i)).toBeInTheDocument();
   });
 
-  it("adiciona produto ao carrinho por código de barras", async () => {
+  it("adiciona produto ao carrinho por codigo de barras", async () => {
     renderPage();
-    const input = screen.getByPlaceholderText(/código de barras/i);
-    fireEvent.change(input, { target: { value: "789001" } });
-    fireEvent.keyDown(input, { key: "Enter", code: "Enter" });
-    await waitFor(() => expect(screen.getByText("Produto Teste")).toBeInTheDocument());
+    await adicionarProduto();
   });
 
-  it("exibe 'Produto não encontrado' para código inválido", async () => {
+  it("exibe 'Produto nao encontrado' para codigo invalido", async () => {
     server.use(
       http.get(`${BASE}/produtos/barras/:codigo`, () =>
-        HttpResponse.json({ error: "Produto não encontrado" }, { status: 404 })
+        HttpResponse.json({ error: "Produto nao encontrado" }, { status: 404 })
       ),
       http.get(`${BASE}/produtos`, () => HttpResponse.json([]))
     );
     renderPage();
-    const input = screen.getByPlaceholderText(/código de barras/i);
+    const input = screen.getByPlaceholderText(/barras/i);
     fireEvent.change(input, { target: { value: "NAO-EXISTE" } });
     fireEvent.keyDown(input, { key: "Enter", code: "Enter" });
-    await waitFor(() => expect(screen.getByText("Produto não encontrado.")).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByText(/produto.*encontrado/i)).toBeInTheDocument());
   });
 
   it("exibe formas de pagamento carregadas", async () => {
@@ -92,9 +106,9 @@ describe("PDVPage", () => {
     expect(screen.getByText("PIX")).toBeInTheDocument();
   });
 
-  it("botão 'Finalizar Venda' desabilitado com carrinho vazio", () => {
+  it("botao Finalizar Venda desabilitado com carrinho vazio", () => {
     renderPage();
-    const btn = screen.getByRole("button", { name: "Finalizar Venda" });
+    const btn = screen.getByRole("button", { name: /finalizar venda/i });
     expect(btn).toBeDisabled();
   });
 
@@ -110,7 +124,33 @@ describe("PDVPage", () => {
     expect(onFechamento).toHaveBeenCalled();
   });
 
-  it("finaliza venda com item + pagamento completo", async () => {
+  it("modal troco abre ao clicar em Dinheiro e fecha ao confirmar", async () => {
+    renderPage();
+    await adicionarProduto();
+    await waitFor(() => expect(screen.getByText("Dinheiro")).toBeInTheDocument());
+    fireEvent.click(screen.getByText("Dinheiro"));
+    await waitFor(() => expect(screen.getByText("Pagamento em Dinheiro")).toBeInTheDocument());
+    // Preencher valor recebido
+    fireEvent.change(screen.getByPlaceholderText("0,00"), { target: { value: "20,00" } });
+    expect(screen.getByText(/troco/i)).toBeInTheDocument();
+    // Confirmar
+    fireEvent.click(screen.getByRole("button", { name: /confirmar/i }));
+    // Modal deve fechar
+    await waitFor(() => expect(screen.queryByText("Pagamento em Dinheiro")).not.toBeInTheDocument());
+  });
+
+  it("modal troco exibe troco correto (R$20 recebido, R$10 valor)", async () => {
+    renderPage();
+    await adicionarProduto();
+    await waitFor(() => expect(screen.getByText("Dinheiro")).toBeInTheDocument());
+    fireEvent.click(screen.getByText("Dinheiro"));
+    await waitFor(() => expect(screen.getByText("Pagamento em Dinheiro")).toBeInTheDocument());
+    fireEvent.change(screen.getByPlaceholderText("0,00"), { target: { value: "20,00" } });
+    // Troco R$10,00
+    await waitFor(() => expect(screen.getAllByText(/10,00/).length).toBeGreaterThan(0));
+  });
+
+  it("finaliza venda com item + pagamento dinheiro completo", async () => {
     let capturedBody: unknown = null;
     server.use(
       http.post(`${BASE}/vendas`, async ({ request }) => {
@@ -119,21 +159,13 @@ describe("PDVPage", () => {
       })
     );
     renderPage();
-    // Adicionar produto
-    const input = screen.getByPlaceholderText(/código de barras/i);
-    fireEvent.change(input, { target: { value: "789001" } });
-    fireEvent.keyDown(input, { key: "Enter", code: "Enter" });
-    await waitFor(() => expect(screen.getByText("Produto Teste")).toBeInTheDocument());
-    // Aguardar carregamento das formas de pagamento
-    await waitFor(() => expect(screen.getByText("Dinheiro")).toBeInTheDocument());
-    // Pagar com Dinheiro
-    fireEvent.click(screen.getByText("Dinheiro"));
+    await adicionarProduto();
+    await pagarComDinheiro("20,00");
     // Finalizar
-    const btnFinalizar = screen.getByRole("button", { name: "Finalizar Venda" });
+    const btnFinalizar = screen.getByRole("button", { name: /finalizar venda/i });
     await waitFor(() => expect(btnFinalizar).not.toBeDisabled());
     fireEvent.click(btnFinalizar);
     await waitFor(() => expect(screen.getByText(/venda finalizada/i)).toBeInTheDocument());
-    // Verificar estrutura do body enviado
     expect(capturedBody).not.toBeNull();
     const body = capturedBody as { pagamentos: Array<{ codigoFormaPagamento: number; valor: number }> };
     expect(body.pagamentos).toBeDefined();
@@ -141,7 +173,7 @@ describe("PDVPage", () => {
     expect(body.pagamentos[0].valor).toBeGreaterThan(0);
   });
 
-  it("body de venda omite campos TEF quando pagamento é direto", async () => {
+  it("body de venda omite campos TEF quando pagamento e direto", async () => {
     let capturedBody: unknown = null;
     server.use(
       http.post(`${BASE}/vendas`, async ({ request }) => {
@@ -150,20 +182,18 @@ describe("PDVPage", () => {
       })
     );
     renderPage();
-    const input = screen.getByPlaceholderText(/código de barras/i);
-    fireEvent.change(input, { target: { value: "789001" } });
-    fireEvent.keyDown(input, { key: "Enter", code: "Enter" });
-    await waitFor(() => expect(screen.getByText("Produto Teste")).toBeInTheDocument());
-    await waitFor(() => expect(screen.getByText("Dinheiro")).toBeInTheDocument());
-    fireEvent.click(screen.getByText("Dinheiro"));
-    const btnFinalizar = screen.getByRole("button", { name: "Finalizar Venda" });
+    await adicionarProduto();
+    await pagarComDinheiro("10,00");
+    const btnFinalizar = screen.getByRole("button", { name: /finalizar venda/i });
     await waitFor(() => expect(btnFinalizar).not.toBeDisabled());
     fireEvent.click(btnFinalizar);
     await waitFor(() => screen.getByText(/venda finalizada/i));
     const body = capturedBody as { pagamentos: Array<Record<string, unknown>> };
-    // Pagamento direto NÃO deve ter campos TEF no body
     expect(body.pagamentos[0].nsu).toBeUndefined();
     expect(body.pagamentos[0].codigoAutorizacao).toBeUndefined();
     expect(body.pagamentos[0].bandeira).toBeUndefined();
   });
 });
+
+
+
