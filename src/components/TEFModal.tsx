@@ -47,7 +47,9 @@ export default function TEFModal({ transacao, status, tipo, onCancelar, onFechar
 
         {/* Ícone + tipo */}
         <div className="text-center space-y-1">
-          <div className="text-5xl">{ICONE[status]}</div>
+          <div className="text-5xl">
+            {status === "aguardando_cartao" && tipo === "pix" ? "📱" : ICONE[status]}
+          </div>
           <p className="text-xs font-medium text-[var(--muted-foreground)] uppercase tracking-wide">
             Pagamento {TIPO_LABEL[tipo]}
           </p>
@@ -70,11 +72,18 @@ export default function TEFModal({ transacao, status, tipo, onCancelar, onFechar
         {/* Status / mensagem */}
         <div className="rounded-lg bg-[var(--muted)] px-4 py-3 text-center space-y-1">
           <p className="text-sm font-semibold" style={{ color: cor }}>
-            {descricaoStatusTEF(status)}
+            {status === "aguardando_cartao" && tipo === "pix"
+              ? "Aguardando pagamento PIX..."
+              : descricaoStatusTEF(status)}
           </p>
-          {mensagem !== descricaoStatusTEF(status) && (
-            <p className="text-xs text-[var(--muted-foreground)]">{mensagem}</p>
-          )}
+          {(() => {
+            const labelStatus = status === "aguardando_cartao" && tipo === "pix"
+              ? "Aguardando pagamento PIX..."
+              : descricaoStatusTEF(status);
+            return mensagem !== labelStatus && (
+              <p className="text-xs text-[var(--muted-foreground)]">{mensagem}</p>
+            );
+          })()}
           {transacao?.mensagemCliente && (
             <p className="text-xs text-[var(--foreground)] font-medium border-t border-[var(--border)] pt-2 mt-2">
               {transacao.mensagemCliente}

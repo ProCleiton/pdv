@@ -141,4 +141,34 @@ describe("MockTefProvider", () => {
     await expect(mock.confirmar("nao-existe")).rejects.toThrow();
     await expect(mock.cancelar("nao-existe")).rejects.toThrow();
   });
+
+  it("iniciar() tipo pix retorna mensagem QR code", async () => {
+    const tx = await mock.iniciar(50.0, "pix");
+    expect(tx.status).toBe("aguardando_cartao");
+    expect(tx.mensagemOperador).toContain("QR Code");
+    expect(tx.mensagemCliente).toContain("QR Code");
+    expect(tx.tipo).toBe("pix");
+  });
+
+  it("confirmar() tipo pix: bandeira Pix, dadosImpressao PIX, sem linha de parcelas", async () => {
+    const tx = await mock.iniciar(50.0, "pix");
+    const aprovado = await mock.confirmar(tx.id);
+    expect(aprovado.status).toBe("aprovado");
+    expect(aprovado.bandeira).toBe("Pix");
+    expect(aprovado.mensagemOperador).toContain("PIX");
+    expect(aprovado.dadosImpressao).toBeDefined();
+    expect(Array.isArray(aprovado.dadosImpressao)).toBe(true);
+    const linhas = aprovado.dadosImpressao as string[];
+    expect(linhas.some((l) => l.includes("PIX"))).toBe(true);
+    // Não deve ter linha de parcelas para PIX
+    expect(linhas.every((l) => !l.match(/^\d+x$/))).toBe(true);
+  });
+
+  it("confirmar() tipo pix aprovado sem passar por aguardando_senha", async () => {
+    const tx = await mock.iniciar(30.0, "pix");
+    expect(tx.status).toBe("aguardando_cartao");
+    const aprovado = await mock.confirmar(tx.id);
+    expect(aprovado.status).toBe("aprovado");
+    expect(aprovado.bandeira).toBe("Pix");
+  });
 });

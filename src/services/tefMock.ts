@@ -59,14 +59,15 @@ export class MockTefProvider implements ITefProvider {
   async iniciar(valor: number, tipo: TipoTransacaoTEF, parcelas = 1): Promise<TransacaoTEF> {
     await this.esperar(200); // simula resposta inicial
 
+    const ehPix = tipo === "pix";
     const tx: TransacaoTEF = {
       id: gerarIdTransacao(),
       valorCentavos: reaisParaCentavos(valor),
       tipo,
       parcelas,
       status: "aguardando_cartao",
-      mensagemOperador: "Aguardando cartão...",
-      mensagemCliente: "Aproxime, insira ou passe o cartão",
+      mensagemOperador: ehPix ? "QR Code exibido no PINPAD. Aguardando pagamento..." : "Aguardando cartão...",
+      mensagemCliente: ehPix ? "Escaneie o QR Code para pagar" : "Aproxime, insira ou passe o cartão",
     };
 
     this.transacoes.set(tx.id, tx);
@@ -77,15 +78,18 @@ export class MockTefProvider implements ITefProvider {
     const tx = this.transacoes.get(id);
     if (!tx) throw new Error(`Transação ${id} não encontrada`);
 
-    // Simula processamento
-    this.transacoes.set(id, {
-      ...tx,
-      status: "aguardando_senha",
-      mensagemOperador: "Aguardando senha...",
-      mensagemCliente: "Digite sua senha",
-    });
+    const ehPix = tx.tipo === "pix";
 
-    await this.esperar(this.config.delayMs / 2);
+    // Para PIX não há senha — vai direto para processando
+    if (!ehPix) {
+      this.transacoes.set(id, {
+        ...tx,
+        status: "aguardando_senha",
+        mensagemOperador: "Aguardando senha...",
+        mensagemCliente: "Digite sua senha",
+      });
+      await this.esperar(this.config.delayMs / 2);
+    }
 
     this.transacoes.set(id, {
       ...tx,
@@ -103,23 +107,32 @@ export class MockTefProvider implements ITefProvider {
         const bandeira = bandeiraPorTipo(tx.tipo) as TransacaoTEF["bandeira"];
         const nsu = gerarNSU();
         const cod = gerarCodAutorizacao();
+        const dadosImpressao = ehPix
+          ? [
+              "COMPROVANTE TEF",
+              "TIPO: PIX via PINPAD",
+              `NSU: ${nsu}`,
+              `AUT: ${cod}`,
+              `VALOR: R$ ${(tx.valorCentavos / 100).toFixed(2).replace(".", ",")}`,
+            ]
+          : [
+              "COMPROVANTE TEF",
+              `${bandeira} - ${tx.tipo.replace(/_/g, " ").toUpperCase()}`,
+              tx.parcelas > 1 ? `${tx.parcelas}x` : "À VISTA",
+              `NSU: ${nsu}`,
+              `AUT: ${cod}`,
+              `VALOR: R$ ${(tx.valorCentavos / 100).toFixed(2).replace(".", ",")}`,
+            ];
         txFinal = {
           ...tx,
           status: "aprovado",
-          mensagemOperador: "Transação aprovada",
+          mensagemOperador: ehPix ? "PIX aprovado via PINPAD" : "Transação aprovada",
           mensagemCliente: "Aprovado!",
           bandeira,
           nsu,
           codigoAutorizacao: cod,
           dtTransacao: new Date().toISOString(),
-          dadosImpressao: [
-            "COMPROVANTE TEF",
-            `${bandeira} - ${tx.tipo.replace(/_/g, " ").toUpperCase()}`,
-            tx.parcelas > 1 ? `${tx.parcelas}x` : "À VISTA",
-            `NSU: ${nsu}`,
-            `AUT: ${cod}`,
-            `VALOR: R$ ${(tx.valorCentavos / 100).toFixed(2).replace(".", ",")}`,
-          ],
+          dadosImpressao,
         };
         break;
       }
