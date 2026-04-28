@@ -191,4 +191,9 @@ export const handlers = [
       dtPagamento: id === 999 ? new Date().toISOString() : null,
     });
   }),
+
+  // Health check — para useOfflineStatus (mantém testes online por padrão)
+  http.get(`${BASE}/actuator/health`, () =>
+    HttpResponse.json({ status: "UP" })
+  ),
 ];

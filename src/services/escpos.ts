@@ -176,6 +176,8 @@ export interface DadosRecibo {
     qrcode?: string;
     urlChave?: string;
   };
+  /** Observação adicional no rodapé (ex: "VENDA OFFLINE") */
+  observacaoRodape?: string;
 }
 
 /** Formata valor monetário em BRL sem usar Intl (CP850 não tem símbolo correto). */
@@ -261,6 +263,10 @@ export function gerarRecibo(dados: DadosRecibo): number[] {
   }
 
   p.emptyLine(3);
+  if (dados.observacaoRodape) {
+    p.center().bold(true).line(dados.observacaoRodape).bold(false);
+    p.emptyLine();
+  }
   p.cut();
 
   return p.toArray();
