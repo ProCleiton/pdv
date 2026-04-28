@@ -61,11 +61,9 @@ npm test             # execução única (CI)
 npm run test:watch   # modo watch
 ```
 
-**Estado atual: 135 testes, 0 falhas ✅** (10 suites — v75)
+**Estado atual: 232 testes, 21 suites, 0 falhas ✅**
 
-Cobertura inclui: ESC/POS, TEF (mock + backend + sitef esqueleto), PDVPage com split payment, NFCe automática, ModalPixPdv (PSP/PIX), comprovante TEF 2 vias, validação de licença, abertura de turno.
-
-> ⚠️ **Bug ambiente local conhecido:** `vitest` falha com `ERR_REQUIRE_ESM` em `html-encoding-sniffer` no Windows local. CI funciona normalmente. Workaround em investigação (Sprint C.3 do roadmap).
+Cobertura inclui: ESC/POS, TEF (mock + backend + sitef esqueleto), PDVPage com split payment, NFCe automática, ModalPixPdv (PSP/PIX), comprovante TEF 2 vias, validação de licença, abertura de turno, **offline-first SQLite + sync automático**.
 
 ---
 
@@ -117,9 +115,20 @@ Cobertura inclui: ESC/POS, TEF (mock + backend + sitef esqueleto), PDVPage com s
 - Polling de status até confirmação ou timeout
 - Confirmação dispara conclusão da venda
 
-### PDV-8 — PIX via PINPAD (F2.13, no roadmap Sprint C)
+### PDV-8 — PIX via PINPAD
 - Roteamento de PIX via PINPAD usando enum TEF + QR no display
-- Aguarda implementação real do provider Stone/SiTef
+- Integração real com SiTef/Stone pendente (aguarda contrato com adquirente)
+
+### PDV-9 — Offline-first com SQLite + Sync automático (F3.7)
+- `tauri-plugin-sql` (SQLite) para armazenamento local persistente
+- Cache de produtos e formas de pagamento na abertura do turno (`useCache`)
+- Detecção automática de conectividade com ping ao backend a cada 15s (`useOfflineStatus`)
+- Fila de vendas offline (`venda_offline_queue`) com sync via `POST /vendas/lote` ao reconectar (`useSyncQueue`)
+- Busca de produto por SQLite quando offline (código de barras ou descrição)
+- TEF **bloqueado** quando offline — apenas dinheiro/voucher aceitos
+- Badge 🟢/🔴 no header com contador de pendentes; modal para sincronização manual
+- Recibo não-fiscal impresso via ESC/POS para vendas offline
+- Idempotência: campo `id_offline` (UUID) em `VENDAS` evita duplicatas no sync
 
 ---
 
@@ -189,8 +198,7 @@ O app PDV pode ser aberto diretamente do **frontend-comercial-v2** (ERP principa
 ## Workflow de desenvolvimento
 
 ```
-main (produção)
-  └── feat/pdv6-simuladores  ← branch de trabalho atual
+main (produção) — sincronizado ✅
 ```
 
 **Regra:** Jamais commitar diretamente em `main`. Toda mudança vai para branch → PR → aprovação → merge.
