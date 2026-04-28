@@ -7,6 +7,7 @@ import PDVPage from "@/pages/PDVPage";
 import SangriaPage from "@/pages/SangriaPage";
 import FechamentoPage from "@/pages/FechamentoPage";
 import ConfigPDVPage from "@/pages/ConfigPDVPage";
+import { PageGuard } from "@/components/layout/PageGuard";
 import { isAutenticado, logout, type UsuarioPDV } from "@/lib/auth";
 import { type TelaAtiva, type TurnoCaixa, type LicencaPDV } from "@/types/pdv";
 import "./App.css";
@@ -153,7 +154,11 @@ function AppContent() {
   }
 
   if (tela === "config_pdv") {
-    return <ConfigPDVPage onVoltar={handleVoltarPDV} />;
+    return (
+      <PageGuard pageId="config-pdv" onVoltar={handleVoltarPDV}>
+        <ConfigPDVPage onVoltar={handleVoltarPDV} />
+      </PageGuard>
+    );
   }
 
   if (tela === "fechamento") {

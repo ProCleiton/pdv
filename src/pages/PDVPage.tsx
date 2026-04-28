@@ -18,6 +18,7 @@ import ModalTroco from "@/pages/ModalTroco";
 import ModalValorParcial from "@/pages/ModalValorParcial";
 import ModalPixPdv from "@/components/ModalPixPdv";
 import type { CobrancaPdv } from "@/services/api";
+import { calcularPermissoesPDV } from "@/lib/permissoes";
 
 interface Props {
   turno: TurnoCaixa;
@@ -465,7 +466,9 @@ export default function PDVPage({ turno, usuario, licenca, onSangria, onFechamen
         <div className="flex items-center gap-2">
           <span className="text-sm text-[var(--muted-foreground)] hidden md:inline">{usuario.nome}</span>
           <Button variant="outline" size="sm" onClick={() => abrirGavetaManual()} title="Abrir gaveta manualmente">🗂</Button>
-          <Button variant="outline" size="sm" onClick={onConfig} title="Configuracoes de hardware">⚙️</Button>
+          {calcularPermissoesPDV(usuario.tipo, "config-pdv").podeVer && (
+            <Button variant="outline" size="sm" onClick={onConfig} title="Configuracoes de hardware">⚙️</Button>
+          )}
           <Button variant="outline" size="sm" onClick={onSangria}>Sangria</Button>
           <Button variant="destructive" size="sm" onClick={onFechamento}>Fechar Caixa</Button>
         </div>

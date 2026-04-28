@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { z } from "zod";
 import { api } from "@/services/api";
 import { logInfo, logError } from "@/services/logger";
 import { Button } from "@/components/ui/Button";
@@ -7,6 +8,16 @@ import type { TurnoCaixa } from "@/types/pdv";
 import type { UsuarioPDV } from "@/lib/auth";
 import { formataMoeda } from "@/lib/utils";
 import { useImpressora } from "@/hooks/useImpressora";
+
+const sangriaSchema = z.object({
+  valor: z.string()
+    .refine(
+      (v) => { const n = parseFloat(v.replace(",", ".")); return Number.isFinite(n) && n > 0; },
+      { message: "Informe um valor válido maior que zero." }
+    )
+    .transform((v) => parseFloat(v.replace(",", "."))),
+  motivo: z.string().trim().min(1, { message: "Informe o motivo da sangria." }).max(200),
+});
 
 interface Props {
   turno: TurnoCaixa;
@@ -26,15 +37,18 @@ export default function SangriaPage({ turno, usuario, onVoltar }: Props) {
   async function handleSalvar(e: React.FormEvent) {
     e.preventDefault();
     setErro("");
-    const v = parseFloat(valor.replace(",", "."));
-    if (!v || v <= 0) { setErro("Informe um valor válido maior que zero."); return; }
-    if (!motivo.trim()) { setErro("Informe o motivo da sangria."); return; }
+    const result = sangriaSchema.safeParse({ valor, motivo });
+    if (!result.success) {
+      setErro(result.error.issues[0].message);
+      return;
+    }
+    const { valor: v, motivo: motivoTrimado } = result.data;
     setSalvando(true);
     try {
       await api.post<{ id: number }>(`/turnos-caixa/${turno.id}/sangrias`, {
         codigoFuncionario: usuario.codigoFuncionario,
         valor: v,
-        motivo: motivo.trim(),
+        motivo: motivoTrimado,
       });
       await logInfo("Sangria", usuario.login, "sangria_registrada", `turno=${turno.id} valor=${v}`);
 
