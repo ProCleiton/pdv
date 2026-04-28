@@ -119,6 +119,7 @@ fn read_scale_once(port_name: String, baud_rate: u32) -> Result<String, String> 
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_sql::Builder::new().build())
         .invoke_handler(tauri::generate_handler![
             get_log_dir,
             append_log_line,

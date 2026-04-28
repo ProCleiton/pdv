@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "@/services/api";
+import { getDb } from "@/services/db";
 import { logInfo, logError } from "@/services/logger";
 import { Button } from "@/components/ui/Button";
 import { Input } from "@/components/ui/Input";
@@ -15,6 +16,9 @@ import { carregarConfigNFCe, emitirNFCeParaVenda } from "@/services/nfce";
 import type { ResultadoNFCe } from "@/types/pdv";
 import { inferirTipoTEF, ehPixPsp, ehDinheiro } from "@/lib/pdv-helpers";
 import { useCarrinho } from "@/hooks/useCarrinho";
+import { useOfflineStatus } from "@/hooks/useOfflineStatus";
+import { useCache } from "@/hooks/useCache";
+import { useSyncQueue } from "@/hooks/useSyncQueue";
 import TEFModal from "@/components/TEFModal";
 import ModalTroco from "@/pages/ModalTroco";
 import ModalValorParcial from "@/pages/ModalValorParcial";
@@ -63,6 +67,13 @@ export default function PDVPage({ turno, usuario, licenca, onSangria, onFechamen
 
   const { imprimirRecibo, abrirGavetaManual, imprimindo, erroImpressora } = useImpressora(usuario);
   const tef = useTEF(usuario);
+  const { online } = useOfflineStatus();
+  const { aquecerCache } = useCache();
+  const { sincronizarFila, contarPendentes, listarPendentes } = useSyncQueue();
+  const [queuePendentes, setQueuePendentes] = useState(0);
+  const [showPendentes, setShowPendentes] = useState(false);
+  const [itensPendentes, setItensPendentes] = useState<Array<{ id: string; dt_venda: string; dt_criacao: string; status: string; erro: string | null }>>([]);
+  const [sincronizando, setSincronizando] = useState(false);
 
   const { data: formasPagamentoRaw = [] } = useQuery<FormaPagamento[]>({
     queryKey: ["formas-pagamento"],
@@ -81,6 +92,31 @@ export default function PDVPage({ turno, usuario, licenca, onSangria, onFechamen
   );
 
   const modalAberto = showTEF || showTroco || showValorParcial || showPixPsp;
+
+  // ─── Cache offline + sync ────────────────────────────────────────────────
+  useEffect(() => {
+    aquecerCache(turno.codigoEstabelecimento);
+    contarPendentes().then(setQueuePendentes);
+  }, []);
+
+  useEffect(() => {
+    if (online) {
+      contarPendentes().then((n) => {
+        setQueuePendentes(n);
+        if (n > 0) {
+          setSincronizando(true);
+          sincronizarFila()
+            .then((stats) => {
+              contarPendentes().then(setQueuePendentes);
+              if (stats.erros > 0) {
+                setErroBusca(`Sync: ${stats.sincronizadas} ok, ${stats.erros} com erro. Verifique pendentes.`);
+              }
+            })
+            .finally(() => setSincronizando(false));
+        }
+      });
+    }
+  }, [online]);
 
   useEffect(() => {
     if (!modalAberto) buscaRef.current?.focus();
@@ -174,6 +210,12 @@ export default function PDVPage({ turno, usuario, licenca, onSangria, onFechamen
       termoBusca = multMatch[2].trim();
     }
 
+    if (!online) {
+      // Modo offline: busca no cache SQLite local
+      await buscarProdutoOffline(termoBusca, quantidade);
+      return;
+    }
+
     try {
       let produto: Produto | null = null;
       try {
@@ -188,11 +230,54 @@ export default function PDVPage({ turno, usuario, licenca, onSangria, onFechamen
       }
       adicionarAoCarrinho(produto, quantidade);
       setBusca("");
-    } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : "Erro na busca";
-      setErroBusca(msg);
+    } catch {
+      // Rede falhou durante busca online — tentar cache
+      await buscarProdutoOffline(termoBusca, quantidade);
     }
-  }, [busca]);
+  }, [busca, online]);
+
+  async function buscarProdutoOffline(termoBusca: string, quantidade: number): Promise<void> {
+    try {
+      const db = await getDb();
+      type ProdutoRow = {
+        id: number; descricao: string; preco_venda: number; codigo_barras: string | null;
+        unidade_medida: string | null; tipo: string | null; controla_estoque: string | null; ativo: string;
+      };
+
+      // Tentar por código de barras primeiro (exato), depois por descrição (parcial)
+      let rows = await db.select<ProdutoRow[]>(
+        "SELECT * FROM produtos_cache WHERE codigo_barras = ? AND ativo = 'S' LIMIT 1",
+        [termoBusca]
+      );
+      if (rows.length === 0) {
+        rows = await db.select<ProdutoRow[]>(
+          "SELECT * FROM produtos_cache WHERE descricao LIKE ? AND ativo = 'S' LIMIT 1",
+          [`%${termoBusca}%`]
+        );
+      }
+      if (rows.length === 0) {
+        setErroBusca("Produto não encontrado (offline — cache local sem resultado).");
+        return;
+      }
+      const r = rows[0];
+      const produto: Produto = {
+        id: r.id,
+        descricao: r.descricao,
+        precoCusto: 0,
+        precoVenda: r.preco_venda,
+        codigoCategoria: 0,
+        tipo: r.tipo ?? "P",
+        controlaEstoque: r.controla_estoque ?? "N",
+        unidadeMedida: r.unidade_medida ?? "UN",
+        codigoBarras: r.codigo_barras ?? "",
+        ativo: r.ativo,
+      };
+      adicionarAoCarrinho(produto, quantidade);
+      setBusca("");
+    } catch {
+      setErroBusca("Sem conexão e sem cache local. Abra um turno online primeiro.");
+    }
+  }
 
   function adicionarPagamentoDireto(
     forma: FormaPagamento,
@@ -318,6 +403,20 @@ export default function PDVPage({ turno, usuario, licenca, onSangria, onFechamen
     if (restante > 0) { setErroBusca("Pagamento insuficiente."); return; }
     setFinalizando(true);
     setErroBusca("");
+
+    // Modo offline: salvar na fila local
+    if (!online) {
+      await finalizarVendaOffline();
+      return;
+    }
+
+    // Antes de finalizar online: flush de pendentes offline (melhor esforço)
+    if (queuePendentes > 0) {
+      sincronizarFila()
+        .then(() => contarPendentes().then(setQueuePendentes))
+        .catch(() => {});
+    }
+
     try {
       const body = {
         codigoEstabelecimento: turno.codigoEstabelecimento,
@@ -340,6 +439,7 @@ export default function PDVPage({ turno, usuario, licenca, onSangria, onFechamen
       };
       const resultado = await api.post<{ id: number }>("/vendas", body);
       await logInfo("PDV", usuario.login, "venda_finalizada", `id=${resultado.id} itens=${carrinho.length} total=${totalCarrinho}`);
+
 
       // Emissão NFCe — não bloqueia a venda em caso de falha
       let nfceResultado: ResultadoNFCe | undefined;
@@ -401,6 +501,82 @@ export default function PDVPage({ turno, usuario, licenca, onSangria, onFechamen
     }
   }
 
+  async function finalizarVendaOffline() {
+    try {
+      // TEF indisponível offline
+      const temTEF = pagamentos.some((p) => p.tipoTransacao);
+      if (temTEF) {
+        setErroBusca("TEF indisponível offline. Remova pagamentos TEF ou use Dinheiro.");
+        return;
+      }
+
+      const idOffline = crypto.randomUUID();
+      const dtVenda = new Date().toISOString().slice(0, 10);
+      const payload = {
+        codigoEstabelecimento: turno.codigoEstabelecimento,
+        codigoFuncionario: usuario.codigoFuncionario,
+        codigoTurnoCaixa: turno.id,
+        dtVenda,
+        idOffline,
+        itens: carrinho.map((item) => ({
+          codigoProduto: item.produto.id,
+          quantidade: item.quantidade,
+          precoVenda: item.precoUnitario,
+          desconto: item.desconto,
+        })),
+        pagamentos: pagamentos.map((p) => ({
+          codigoFormaPagamento: p.codigoFormaPagamento,
+          valor: p.valor,
+        })),
+      };
+
+      const db = await getDb();
+      await db.execute(
+        `INSERT INTO venda_offline_queue (id, dt_venda, payload, status, dt_criacao)
+         VALUES (?, ?, ?, 'pendente', ?)`,
+        [idOffline, dtVenda, JSON.stringify(payload), new Date().toISOString()]
+      );
+
+      const novoPendentes = queuePendentes + 1;
+      setQueuePendentes(novoPendentes);
+
+      await logInfo("PDV", usuario.login, "venda_offline_salva", `idOffline=${idOffline} itens=${carrinho.length} total=${totalCarrinho}`);
+
+      // Imprimir recibo não-fiscal offline
+      await imprimirRecibo({
+        numeroCupom: `OFFLINE-${idOffline.slice(0, 8).toUpperCase()}`,
+        nomeEstabelecimento: licenca.nomeTerminal,
+        operador: usuario.nome,
+        itens: carrinho.map((item) => ({
+          descricao: item.produto.descricao,
+          quantidade: item.quantidade,
+          precoUnitario: item.precoUnitario,
+          desconto: item.desconto,
+          total: (item.precoUnitario - item.desconto) * item.quantidade,
+        })),
+        pagamentos: pagamentos.map((p) => ({
+          descricao: p.nomeFormaPagamento,
+          valor: p.valor,
+        })),
+        totalBruto: totalCarrinho,
+        troco,
+        observacaoRodape: "VENDA OFFLINE — será sincronizada ao reconectar",
+      });
+
+      setCarrinho([]);
+      setPagamentos([]);
+      setItemSelecionadoIdx(null);
+      setSucesso(true);
+      setTimeout(() => setSucesso(false), 2000);
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : "Erro ao salvar venda offline";
+      setErroBusca(msg);
+      await logError("PDV", usuario.login, "erro_venda_offline", msg);
+    } finally {
+      setFinalizando(false);
+    }
+  }
+
   // Hint de multiplicador no input
   const multMatch = busca.match(/^(\d+)\*(.*)$/);
   const multiplicadorAtivo = multMatch ? parseInt(multMatch[1], 10) : null;
@@ -416,6 +592,29 @@ export default function PDVPage({ turno, usuario, licenca, onSangria, onFechamen
         </div>
         <div className="flex items-center gap-2">
           <span className="text-sm text-[var(--muted-foreground)] hidden md:inline">{usuario.nome}</span>
+          {/* Badge de status Online/Offline */}
+          <button
+            onClick={() => {
+              listarPendentes().then((items) => {
+                setItensPendentes(items);
+                setShowPendentes(true);
+              });
+            }}
+            className={`flex items-center gap-1 text-xs px-2 py-1 rounded-full font-medium ${
+              online
+                ? "bg-green-100 text-green-800 dark:bg-green-900/40 dark:text-green-300"
+                : "bg-red-100 text-red-800 dark:bg-red-900/40 dark:text-red-300"
+            }`}
+            title={online ? "Online — clique para ver fila" : "Offline — clique para ver fila"}
+          >
+            <span>{online ? "🟢" : "🔴"}</span>
+            <span>{online ? "Online" : "Offline"}</span>
+            {queuePendentes > 0 && (
+              <span className="bg-yellow-400 text-yellow-900 text-[10px] px-1 rounded-full ml-1">
+                {queuePendentes}
+              </span>
+            )}
+          </button>
           <Button variant="outline" size="sm" onClick={() => abrirGavetaManual()} title="Abrir gaveta manualmente">🗂</Button>
           {calcularPermissoesPDV(usuario.tipo, "config-pdv").podeVer && (
             <Button variant="outline" size="sm" onClick={onConfig} title="Configuracoes de hardware">⚙️</Button>
@@ -667,6 +866,63 @@ export default function PDVPage({ turno, usuario, licenca, onSangria, onFechamen
           onPago={handlePixPspPago}
           onCancelar={handlePixPspCancelar}
         />
+      )}
+
+      {/* Modal de pendentes offline */}
+      {showPendentes && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50">
+          <div className="bg-[var(--card)] border border-[var(--border)] rounded-lg shadow-xl w-full max-w-lg p-5">
+            <div className="flex items-center justify-between mb-4">
+              <h2 className="text-base font-semibold">Vendas Offline Pendentes ({queuePendentes})</h2>
+              <button onClick={() => setShowPendentes(false)} className="text-[var(--muted-foreground)] hover:text-[var(--foreground)]">✕</button>
+            </div>
+            {itensPendentes.length === 0 ? (
+              <p className="text-sm text-[var(--muted-foreground)]">Nenhuma venda pendente.</p>
+            ) : (
+              <div className="overflow-auto max-h-72">
+                <table className="w-full text-xs">
+                  <thead>
+                    <tr className="text-left text-[var(--muted-foreground)] border-b border-[var(--border)]">
+                      <th className="pb-1 pr-2">ID (parcial)</th>
+                      <th className="pb-1 pr-2">Data</th>
+                      <th className="pb-1 pr-2">Status</th>
+                      <th className="pb-1">Erro</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {itensPendentes.map((item) => (
+                      <tr key={item.id} className="border-b border-[var(--border)]/50">
+                        <td className="py-1 pr-2 font-mono">{item.id.slice(0, 8)}</td>
+                        <td className="py-1 pr-2">{item.dt_venda}</td>
+                        <td className={`py-1 pr-2 ${item.status === "erro" ? "text-red-500" : "text-yellow-600"}`}>{item.status}</td>
+                        <td className="py-1 text-[var(--muted-foreground)] truncate max-w-[140px]">{item.erro ?? "—"}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+            <div className="flex justify-end gap-2 mt-4">
+              <Button variant="outline" size="sm" onClick={() => setShowPendentes(false)}>Fechar</Button>
+              <Button
+                size="sm"
+                disabled={sincronizando || !online || queuePendentes === 0}
+                onClick={() => {
+                  setSincronizando(true);
+                  sincronizarFila()
+                    .then(() => Promise.all([contarPendentes(), listarPendentes()]))
+                    .then(([count, items]) => {
+                      setQueuePendentes(count);
+                      setItensPendentes(items);
+                    })
+                    .finally(() => setSincronizando(false));
+                }}
+              >
+                {sincronizando ? "Sincronizando…" : "Sincronizar agora"}
+              </Button>
+            </div>
+          </div>
+        </div>
       )}
     </div>
   );
