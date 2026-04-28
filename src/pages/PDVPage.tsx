@@ -5,7 +5,7 @@ import { logInfo, logError } from "@/services/logger";
 import { Button } from "@/components/ui/Button";
 import { Input } from "@/components/ui/Input";
 import { cn, formataMoeda, formataNumeroPedido } from "@/lib/utils";
-import type { TurnoCaixa, Produto, ItemCarrinho, FormaPagamento, PagamentoCarrinho } from "@/types/pdv";
+import type { TurnoCaixa, Produto, FormaPagamento, PagamentoCarrinho } from "@/types/pdv";
 import type { UsuarioPDV } from "@/lib/auth";
 import type { LicencaPDV } from "@/types/pdv";
 import { useImpressora } from "@/hooks/useImpressora";
@@ -13,6 +13,8 @@ import { useTEF } from "@/hooks/useTEF";
 import type { TipoTransacaoTEF } from "@/services/tef";
 import { carregarConfigNFCe, emitirNFCeParaVenda } from "@/services/nfce";
 import type { ResultadoNFCe } from "@/types/pdv";
+import { inferirTipoTEF, ehPixPsp, ehDinheiro } from "@/lib/pdv-helpers";
+import { useCarrinho } from "@/hooks/useCarrinho";
 import TEFModal from "@/components/TEFModal";
 import ModalTroco from "@/pages/ModalTroco";
 import ModalValorParcial from "@/pages/ModalValorParcial";
@@ -30,34 +32,14 @@ interface Props {
 }
 
 /** Mapeia descricao da forma de pagamento para tipo TEF. */
-function inferirTipoTEF(descricao: string): TipoTransacaoTEF {
-  const d = descricao.toLowerCase();
-  if (d.includes("debit") || d.includes("debito")) return "debito";
-  if (d.includes("pix")) return "pix";
-  if (d.includes("voucher") || d.includes("beneficio") || d.includes("vale")) return "voucher";
-  if (d.includes("parc")) return "credito_parcelado_loja";
-  return "credito_vista";
-}
-
-/** Retorna true se a forma de pagamento é PIX via PSP (não TEF). */
-function ehPixPsp(descricao: string): boolean {
-  const d = descricao.toUpperCase();
-  return d.includes("PIX") && (d.includes("PSP") || d.includes("QR"));
-}
-
-/** Retorna true se a forma de pagamento e dinheiro. */
-function ehDinheiro(descricao: string): boolean {
-  return descricao.toUpperCase().includes("DINHEIRO");
-}
 
 export default function PDVPage({ turno, usuario, licenca, onSangria, onFechamento, onConfig }: Props) {
   const [busca, setBusca] = useState("");
-  const [carrinho, setCarrinho] = useState<ItemCarrinho[]>([]);
+  const { carrinho, setCarrinho, itemSelecionadoIdx, setItemSelecionadoIdx, totalCarrinho, adicionarAoCarrinho, removerItem, alterarQuantidade } = useCarrinho();
   const [pagamentos, setPagamentos] = useState<PagamentoCarrinho[]>([]);
   const [erroBusca, setErroBusca] = useState("");
   const [finalizando, setFinalizando] = useState(false);
   const [sucesso, setSucesso] = useState(false);
-  const [itemSelecionadoIdx, setItemSelecionadoIdx] = useState<number | null>(null);
   const buscaRef = useRef<HTMLInputElement>(null);
 
   // Modal Troco (dinheiro)
@@ -104,11 +86,6 @@ export default function PDVPage({ turno, usuario, licenca, onSangria, onFechamen
     if (!modalAberto) buscaRef.current?.focus();
   }, [sucesso, modalAberto]);
 
-  // Calculos
-  const totalCarrinho = carrinho.reduce(
-    (acc, item) => acc + (item.precoUnitario - item.desconto) * item.quantidade,
-    0
-  );
   const totalPago = pagamentos.reduce((acc, p) => acc + p.valor, 0);
   const restante = totalCarrinho - totalPago;
   const troco = totalPago > totalCarrinho ? totalPago - totalCarrinho : 0;
@@ -216,32 +193,6 @@ export default function PDVPage({ turno, usuario, licenca, onSangria, onFechamen
       setErroBusca(msg);
     }
   }, [busca]);
-
-  function adicionarAoCarrinho(produto: Produto, qtd = 1) {
-    setCarrinho((prev) => {
-      const idx = prev.findIndex((item) => item.produto.id === produto.id);
-      if (idx >= 0) {
-        const atualizado = [...prev];
-        atualizado[idx] = { ...atualizado[idx], quantidade: atualizado[idx].quantidade + qtd };
-        return atualizado;
-      }
-      return [...prev, { produto, quantidade: qtd, precoUnitario: produto.precoVenda, desconto: 0 }];
-    });
-  }
-
-  function removerItem(idx: number) {
-    setCarrinho((prev) => prev.filter((_, i) => i !== idx));
-    if (itemSelecionadoIdx === idx) setItemSelecionadoIdx(null);
-  }
-
-  function alterarQuantidade(idx: number, novaQtd: number) {
-    if (novaQtd <= 0) { removerItem(idx); return; }
-    setCarrinho((prev) => {
-      const atualizado = [...prev];
-      atualizado[idx] = { ...atualizado[idx], quantidade: novaQtd };
-      return atualizado;
-    });
-  }
 
   function adicionarPagamentoDireto(
     forma: FormaPagamento,
